@@ -50,12 +50,22 @@ app.get('/proxy', (req, res) => {
   }
   
   // HTTPS 또는 HTTP 선택
-  const protocol = urlObj.protocol === 'https:' ? https : http;
-  const defaultPort = urlObj.protocol === 'https:' ? 443 : 80;
+  const isHttps = urlObj.protocol === 'https:';
+  const protocol = isHttps ? https : http;
+  
+  // 포트 결정 (UNI-PASS는 38010 사용)
+  let port;
+  if (urlObj.port) {
+    port = parseInt(urlObj.port, 10);
+  } else if (urlObj.hostname.includes('unipass.customs.go.kr')) {
+    port = 38010; // UNI-PASS 기본 포트
+  } else {
+    port = isHttps ? 443 : 80;
+  }
   
   const options = {
     hostname: urlObj.hostname,
-    port: urlObj.port || defaultPort,
+    port: port,
     path: urlObj.pathname + urlObj.search,
     method: 'GET',
     rejectUnauthorized: false, // SSL 인증서 검증 우회 (핵심!)
@@ -68,7 +78,7 @@ app.get('/proxy', (req, res) => {
     }
   };
   
-  console.log(`[PROXY] Requesting: ${urlObj.hostname}${urlObj.pathname}`);
+  console.log(`[PROXY] Requesting: ${urlObj.hostname}:${port}${urlObj.pathname}`);
   
   const proxyReq = protocol.request(options, (proxyRes) => {
     let data = '';
@@ -83,6 +93,7 @@ app.get('/proxy', (req, res) => {
       const contentType = proxyRes.headers['content-type'] || 'text/plain';
       res.set('Content-Type', contentType);
       res.set('X-Proxy-Status', 'success');
+      res.set('X-Proxy-Port', port.toString());
       res.send(data);
     });
   });
@@ -92,7 +103,8 @@ app.get('/proxy', (req, res) => {
     res.status(500).json({ 
       error: 'Proxy request failed', 
       message: e.message,
-      code: e.code || 'UNKNOWN'
+      code: e.code || 'UNKNOWN',
+      target: `${urlObj.hostname}:${port}`
     });
   });
   
@@ -109,18 +121,19 @@ app.get('/proxy', (req, res) => {
 app.get('/', (req, res) => {
   res.json({
     name: 'Korean API Proxy',
+    version: '1.1.0',
     endpoints: {
       proxy: '/proxy?url=<encoded_url>',
       health: '/health'
     },
     allowedDomains: [
-      'www.koreaexim.go.kr',
-      'unipass.customs.go.kr'
+      'www.koreaexim.go.kr (port 443)',
+      'unipass.customs.go.kr (port 38010)'
     ]
   });
 });
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, '0.0.0.0', () => {
-  console.log(`🚀 Korean API Proxy running on port ${PORT}`);
+  console.log(`🚀 Korean API Proxy v1.1.0 running on port ${PORT}`);
 });
