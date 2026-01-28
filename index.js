@@ -1,7 +1,21 @@
 const express = require('express');
+const axios = require('axios');
 const https = require('https');
-const http = require('http');
 const app = express();
+
+// SSL 인증서 검증 무시하는 axios 인스턴스
+const axiosInstance = axios.create({
+  httpsAgent: new https.Agent({
+    rejectUnauthorized: false
+  }),
+  timeout: 30000,
+  maxRedirects: 10,
+  headers: {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Accept': 'application/json, text/plain, text/xml, */*',
+    'Accept-Language': 'ko-KR,ko;q=0.9',
+  }
+});
 
 // CORS 설정
 app.use((req, res, next) => {
@@ -12,80 +26,10 @@ app.use((req, res, next) => {
   next();
 });
 
-// 상태 확인 엔드포인트
+// 상태 확인
 app.get('/health', (req, res) => {
-  res.json({ status: 'ok', timestamp: new Date().toISOString() });
+  res.json({ status: 'ok', version: '1.5.0', timestamp: new Date().toISOString() });
 });
-
-// 한국수출입은행 전용 fetch (Node.js fetch 사용)
-async function fetchKoreaExim(targetUrl) {
-  console.log(`[KOREAEXIM] Fetching: ${targetUrl}`);
-  
-  const response = await fetch(targetUrl, {
-    method: 'GET',
-    headers: {
-      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-      'Accept': 'application/json, text/plain, */*',
-      'Accept-Language': 'ko-KR,ko;q=0.9',
-    },
-    redirect: 'follow', // 리다이렉트 자동 처리
-  });
-  
-  console.log(`[KOREAEXIM] Status: ${response.status}`);
-  const data = await response.text();
-  console.log(`[KOREAEXIM] Response length: ${data.length}`);
-  console.log(`[KOREAEXIM] First 300 chars: ${data.substring(0, 300)}`);
-  
-  return {
-    statusCode: response.status,
-    contentType: response.headers.get('content-type') || 'application/json',
-    data: data
-  };
-}
-
-// UNI-PASS 전용 fetch (포트 38010, SSL 우회)
-function fetchUnipass(targetUrl) {
-  return new Promise((resolve, reject) => {
-    const urlObj = new URL(targetUrl);
-    
-    const options = {
-      hostname: urlObj.hostname,
-      port: urlObj.port || 38010,
-      path: urlObj.pathname + urlObj.search,
-      method: 'GET',
-      rejectUnauthorized: false, // SSL 우회
-      timeout: 30000,
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-        'Accept': '*/*',
-      }
-    };
-    
-    console.log(`[UNIPASS] Fetching: ${urlObj.hostname}:${options.port}${urlObj.pathname}`);
-    
-    const req = https.request(options, (res) => {
-      let data = '';
-      res.setEncoding('utf8');
-      
-      res.on('data', chunk => data += chunk);
-      res.on('end', () => {
-        console.log(`[UNIPASS] Status: ${res.statusCode}, Length: ${data.length}`);
-        resolve({
-          statusCode: res.statusCode,
-          contentType: res.headers['content-type'] || 'application/xml',
-          data: data
-        });
-      });
-    });
-    
-    req.on('error', reject);
-    req.on('timeout', () => {
-      req.destroy();
-      reject(new Error('Timeout'));
-    });
-    req.end();
-  });
-}
 
 // 프록시 엔드포인트
 app.get('/proxy', async (req, res) => {
@@ -106,42 +50,50 @@ app.get('/proxy', async (req, res) => {
   }
   
   // 허용된 도메인 확인
-  const isKoreaExim = urlObj.hostname.includes('koreaexim.go.kr');
-  const isUnipass = urlObj.hostname.includes('unipass.customs.go.kr');
-  
-  if (!isKoreaExim && !isUnipass) {
+  const allowedHosts = ['koreaexim.go.kr', 'unipass.customs.go.kr'];
+  if (!allowedHosts.some(h => urlObj.hostname.includes(h))) {
     return res.status(403).json({ 
       error: 'Domain not allowed',
-      allowedDomains: ['koreaexim.go.kr', 'unipass.customs.go.kr']
+      allowedDomains: allowedHosts
     });
   }
   
   try {
-    let result;
+    console.log(`[PROXY] Requesting: ${targetUrl}`);
     
-    if (isKoreaExim) {
-      result = await fetchKoreaExim(targetUrl);
-    } else {
-      result = await fetchUnipass(targetUrl);
+    const response = await axiosInstance.get(targetUrl);
+    
+    console.log(`[PROXY] Status: ${response.status}`);
+    console.log(`[PROXY] Data type: ${typeof response.data}`);
+    console.log(`[PROXY] Data preview: ${JSON.stringify(response.data).substring(0, 200)}`);
+    
+    // 응답 데이터 처리
+    let responseData = response.data;
+    let contentType = response.headers['content-type'] || 'application/json';
+    
+    // 객체인 경우 JSON 문자열로 변환
+    if (typeof responseData === 'object') {
+      responseData = JSON.stringify(responseData);
+      contentType = 'application/json';
     }
     
-    if (!result.data || result.data.length === 0) {
-      return res.status(502).json({
-        error: 'Empty response from target server',
-        statusCode: result.statusCode
-      });
-    }
-    
-    res.set('Content-Type', result.contentType);
+    res.set('Content-Type', contentType);
     res.set('X-Proxy-Status', 'success');
-    res.set('X-Target-Domain', isKoreaExim ? 'koreaexim' : 'unipass');
-    res.send(result.data);
+    res.send(responseData);
     
   } catch (error) {
-    console.error(`[PROXY] Error: ${error.message}`);
+    console.error(`[PROXY] Error:`, error.message);
+    
+    // axios 에러 상세 정보
+    if (error.response) {
+      console.error(`[PROXY] Response status: ${error.response.status}`);
+      console.error(`[PROXY] Response data: ${JSON.stringify(error.response.data).substring(0, 500)}`);
+    }
+    
     res.status(500).json({ 
       error: 'Proxy request failed', 
-      message: error.message
+      message: error.message,
+      code: error.code || 'UNKNOWN'
     });
   }
 });
@@ -150,15 +102,16 @@ app.get('/proxy', async (req, res) => {
 app.get('/', (req, res) => {
   res.json({
     name: 'Korean API Proxy',
-    version: '1.4.0',
+    version: '1.5.0',
     endpoints: {
       proxy: '/proxy?url=<encoded_url>',
       health: '/health'
-    }
+    },
+    allowedDomains: ['koreaexim.go.kr', 'unipass.customs.go.kr']
   });
 });
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, '0.0.0.0', () => {
-  console.log(`🚀 Korean API Proxy v1.4.0 running on port ${PORT}`);
+  console.log(`🚀 Korean API Proxy v1.5.0 running on port ${PORT}`);
 });
