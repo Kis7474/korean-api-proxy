@@ -17,8 +17,101 @@ app.get('/health', (req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
+// 내부 fetch 함수 (리다이렉트 자동 처리)
+function fetchWithRedirect(targetUrl, maxRedirects = 5) {
+  return new Promise((resolve, reject) => {
+    if (maxRedirects <= 0) {
+      reject(new Error('Too many redirects'));
+      return;
+    }
+    
+    const urlObj = new URL(targetUrl);
+    
+    // 한국수출입은행은 HTTP 사용
+    let useHttp = urlObj.hostname.includes('koreaexim.go.kr');
+    const isHttps = !useHttp && urlObj.protocol === 'https:';
+    const protocol = isHttps ? https : http;
+    
+    // 포트 결정
+    let port;
+    if (urlObj.port) {
+      port = parseInt(urlObj.port, 10);
+    } else if (urlObj.hostname.includes('unipass.customs.go.kr')) {
+      port = 38010;
+    } else {
+      port = isHttps ? 443 : 80;
+    }
+    
+    const options = {
+      hostname: urlObj.hostname,
+      port: port,
+      path: urlObj.pathname + urlObj.search,
+      method: 'GET',
+      rejectUnauthorized: false,
+      timeout: 30000,
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'application/json, text/plain, */*',
+        'Accept-Language': 'ko-KR,ko;q=0.9',
+        'Accept-Encoding': 'identity',
+        'Cache-Control': 'no-cache',
+      }
+    };
+    
+    console.log(`[FETCH] ${isHttps ? 'HTTPS' : 'HTTP'} ${urlObj.hostname}:${port}${urlObj.pathname}`);
+    
+    const req = protocol.request(options, (res) => {
+      // 리다이렉트 자동 처리
+      if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+        let redirectUrl = res.headers.location;
+        
+        // 상대 경로인 경우 절대 경로로 변환
+        if (redirectUrl.startsWith('/')) {
+          const baseProtocol = useHttp ? 'http:' : urlObj.protocol;
+          redirectUrl = `${baseProtocol}//${urlObj.hostname}${urlObj.port ? ':' + urlObj.port : ''}${redirectUrl}`;
+        }
+        
+        console.log(`[FETCH] Redirect to: ${redirectUrl}`);
+        
+        fetchWithRedirect(redirectUrl, maxRedirects - 1)
+          .then(resolve)
+          .catch(reject);
+        return;
+      }
+      
+      let data = '';
+      res.setEncoding('utf8');
+      
+      res.on('data', chunk => {
+        data += chunk;
+      });
+      
+      res.on('end', () => {
+        console.log(`[FETCH] Response: ${res.statusCode}, ${data.length} bytes`);
+        resolve({
+          statusCode: res.statusCode,
+          headers: res.headers,
+          data: data
+        });
+      });
+    });
+    
+    req.on('error', (e) => {
+      console.error(`[FETCH] Error: ${e.message}`);
+      reject(e);
+    });
+    
+    req.on('timeout', () => {
+      req.destroy();
+      reject(new Error('Request timeout (30s)'));
+    });
+    
+    req.end();
+  });
+}
+
 // 프록시 엔드포인트
-app.get('/proxy', (req, res) => {
+app.get('/proxy', async (req, res) => {
   const targetUrl = req.query.url;
   
   if (!targetUrl) {
@@ -49,128 +142,48 @@ app.get('/proxy', (req, res) => {
     });
   }
   
-  // 한국수출입은행은 HTTP로 강제 (HTTPS가 빈 응답 반환)
-  let fetchUrl = targetUrl;
-  let useHttp = false;
-  
-  if (urlObj.hostname.includes('koreaexim.go.kr')) {
-    fetchUrl = targetUrl.replace('https://', 'http://');
-    useHttp = true;
-  }
-  
-  // 프로토콜 결정
-  const isHttps = !useHttp && urlObj.protocol === 'https:';
-  const protocol = isHttps ? https : http;
-  
-  // 포트 결정
-  let port;
-  if (urlObj.port) {
-    port = parseInt(urlObj.port, 10);
-  } else if (urlObj.hostname.includes('unipass.customs.go.kr')) {
-    port = 38010;
-  } else {
-    port = isHttps ? 443 : 80;
-  }
-  
-  // URL 재파싱 (HTTP로 변경된 경우)
-  const finalUrlObj = new URL(fetchUrl);
-  
-  const options = {
-    hostname: finalUrlObj.hostname,
-    port: port,
-    path: finalUrlObj.pathname + finalUrlObj.search,
-    method: 'GET',
-    rejectUnauthorized: false,
-    timeout: 30000,
-    headers: {
-      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-      'Accept': 'application/json, text/plain, */*',
-      'Accept-Language': 'ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7',
-      'Accept-Encoding': 'identity',
-      'Cache-Control': 'no-cache',
-    }
-  };
-  
-  console.log(`[PROXY] Requesting: ${protocol === https ? 'HTTPS' : 'HTTP'} ${finalUrlObj.hostname}:${port}${finalUrlObj.pathname}`);
-  
-  const proxyReq = protocol.request(options, (proxyRes) => {
-    let data = '';
-    proxyRes.setEncoding('utf8');
+  try {
+    const result = await fetchWithRedirect(targetUrl);
     
-    // 리다이렉트 처리
-    if (proxyRes.statusCode >= 300 && proxyRes.statusCode < 400 && proxyRes.headers.location) {
-      console.log(`[PROXY] Redirect to: ${proxyRes.headers.location}`);
-      // 리다이렉트 URL로 다시 요청 (간단히 클라이언트에게 알림)
-      return res.status(200).json({
-        redirect: true,
-        location: proxyRes.headers.location,
-        message: 'Redirect detected'
+    if (!result.data || result.data.length === 0) {
+      return res.status(502).json({
+        error: 'Empty response from target server',
+        statusCode: result.statusCode
       });
     }
     
-    proxyRes.on('data', chunk => {
-      data += chunk;
-    });
+    const contentType = result.headers['content-type'] || 'application/json';
+    res.set('Content-Type', contentType);
+    res.set('X-Proxy-Status', 'success');
+    res.send(result.data);
     
-    proxyRes.on('end', () => {
-      console.log(`[PROXY] Response: ${proxyRes.statusCode}, ${data.length} bytes`);
-      console.log(`[PROXY] First 200 chars: ${data.substring(0, 200)}`);
-      
-      if (data.length === 0) {
-        return res.status(502).json({
-          error: 'Empty response from target server',
-          statusCode: proxyRes.statusCode,
-          target: `${finalUrlObj.hostname}:${port}`
-        });
-      }
-      
-      const contentType = proxyRes.headers['content-type'] || 'application/json';
-      res.set('Content-Type', contentType);
-      res.set('X-Proxy-Status', 'success');
-      res.set('X-Proxy-Protocol', protocol === https ? 'HTTPS' : 'HTTP');
-      res.set('X-Proxy-Port', port.toString());
-      res.send(data);
-    });
-  });
-  
-  proxyReq.on('error', (e) => {
-    console.error(`[PROXY] Error: ${e.message}`);
+  } catch (error) {
+    console.error(`[PROXY] Error: ${error.message}`);
     res.status(500).json({ 
       error: 'Proxy request failed', 
-      message: e.message,
-      code: e.code || 'UNKNOWN',
-      target: `${finalUrlObj.hostname}:${port}`,
-      protocol: protocol === https ? 'HTTPS' : 'HTTP'
+      message: error.message
     });
-  });
-  
-  proxyReq.on('timeout', () => {
-    console.error('[PROXY] Request timeout');
-    proxyReq.destroy();
-    res.status(504).json({ error: 'Request timeout (30s)' });
-  });
-  
-  proxyReq.end();
+  }
 });
 
 // 루트 경로
 app.get('/', (req, res) => {
   res.json({
     name: 'Korean API Proxy',
-    version: '1.2.0',
+    version: '1.3.0',
+    features: [
+      'Auto redirect handling',
+      'HTTP for Korea Exim Bank',
+      'HTTPS port 38010 for UNI-PASS'
+    ],
     endpoints: {
       proxy: '/proxy?url=<encoded_url>',
       health: '/health'
-    },
-    allowedDomains: [
-      'www.koreaexim.go.kr (HTTP, port 80)',
-      'unipass.customs.go.kr (HTTPS, port 38010)'
-    ],
-    note: 'Korea Exim Bank API is forced to use HTTP due to HTTPS issues'
+    }
   });
 });
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, '0.0.0.0', () => {
-  console.log(`🚀 Korean API Proxy v1.2.0 running on port ${PORT}`);
+  console.log(`🚀 Korean API Proxy v1.3.0 running on port ${PORT}`);
 });
