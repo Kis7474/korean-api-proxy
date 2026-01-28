@@ -28,12 +28,12 @@ app.use((req, res, next) => {
 
 // 상태 확인
 app.get('/health', (req, res) => {
-  res.json({ status: 'ok', version: '1.5.0', timestamp: new Date().toISOString() });
+  res.json({ status: 'ok', version: '2.0.0', timestamp: new Date().toISOString() });
 });
 
 // 프록시 엔드포인트
 app.get('/proxy', async (req, res) => {
-  const targetUrl = req.query.url;
+  let targetUrl = req.query.url;
   
   if (!targetUrl) {
     return res.status(400).json({ 
@@ -58,6 +58,12 @@ app.get('/proxy', async (req, res) => {
     });
   }
   
+  // ★★★ 한국수출입은행 URL 자동 변환 (2025.6.25 변경사항) ★★★
+  if (urlObj.hostname === 'www.koreaexim.go.kr') {
+    targetUrl = targetUrl.replace('www.koreaexim.go.kr', 'oapi.koreaexim.go.kr');
+    console.log(`[PROXY] URL converted to new domain: ${targetUrl}`);
+  }
+  
   try {
     console.log(`[PROXY] Requesting: ${targetUrl}`);
     
@@ -65,17 +71,18 @@ app.get('/proxy', async (req, res) => {
     
     console.log(`[PROXY] Status: ${response.status}`);
     console.log(`[PROXY] Data type: ${typeof response.data}`);
-    console.log(`[PROXY] Data preview: ${JSON.stringify(response.data).substring(0, 200)}`);
     
     // 응답 데이터 처리
     let responseData = response.data;
     let contentType = response.headers['content-type'] || 'application/json';
     
-    // 객체인 경우 JSON 문자열로 변환
+    // 객체/배열인 경우 JSON 문자열로 변환
     if (typeof responseData === 'object') {
       responseData = JSON.stringify(responseData);
       contentType = 'application/json';
     }
+    
+    console.log(`[PROXY] Response length: ${responseData.length}`);
     
     res.set('Content-Type', contentType);
     res.set('X-Proxy-Status', 'success');
@@ -84,10 +91,8 @@ app.get('/proxy', async (req, res) => {
   } catch (error) {
     console.error(`[PROXY] Error:`, error.message);
     
-    // axios 에러 상세 정보
     if (error.response) {
       console.error(`[PROXY] Response status: ${error.response.status}`);
-      console.error(`[PROXY] Response data: ${JSON.stringify(error.response.data).substring(0, 500)}`);
     }
     
     res.status(500).json({ 
@@ -102,7 +107,8 @@ app.get('/proxy', async (req, res) => {
 app.get('/', (req, res) => {
   res.json({
     name: 'Korean API Proxy',
-    version: '1.5.0',
+    version: '2.0.0',
+    note: 'Korea Exim Bank URL auto-converted to oapi.koreaexim.go.kr',
     endpoints: {
       proxy: '/proxy?url=<encoded_url>',
       health: '/health'
@@ -113,5 +119,5 @@ app.get('/', (req, res) => {
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, '0.0.0.0', () => {
-  console.log(`🚀 Korean API Proxy v1.5.0 running on port ${PORT}`);
+  console.log(`🚀 Korean API Proxy v2.0.0 running on port ${PORT}`);
 });
